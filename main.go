@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+        "os"
 	"flag"
 	"io"
 	"log"
@@ -12,6 +13,12 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/gorilla/mux"
 	"google.golang.org/api/option"
+
+        "io/ioutil"
+        "path/filepath"
+
+	"gopkg.in/yaml.v2"
+	"github.com/daichirata/gcsproxy/headers"
 )
 
 var (
@@ -28,9 +35,9 @@ var (
 func handleError(w http.ResponseWriter, err error) {
 	if err != nil {
 		if err == storage.ErrObjectNotExist {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "", http.StatusNotFound)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -74,6 +81,13 @@ func (w *wrapResponseWriter) WriteHeader(status int) {
 	w.status = status
 }
 
+type Config struct {
+	Buckets map[string]string `yaml:"buckets"`
+}
+
+
+var config Config
+
 func wrapper(fn func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		proc := time.Now()
@@ -98,20 +112,21 @@ func wrapper(fn func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	}
 }
 
+func check(e error) {
+	if e != nil {
+		panic(e)
+	}
+}
+
 func proxy(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r)
-	obj := client.Bucket(params["bucket"]).Object(params["object"])
-	attr, err := obj.Attrs(ctx)
-	if err != nil {
+	obj := client.Bucket(config.Buckets[r.Host]).Object(params["object"])
+
+        err := headers.SetHeaders(ctx, obj, w)
+        if err != nil {
 		handleError(w, err)
 		return
-	}
-	setStrHeader(w, "Content-Type", attr.ContentType)
-	setStrHeader(w, "Content-Language", attr.ContentLanguage)
-	setStrHeader(w, "Cache-Control", attr.CacheControl)
-	setStrHeader(w, "Content-Encoding", attr.ContentEncoding)
-	setStrHeader(w, "Content-Disposition", attr.ContentDisposition)
-	setIntHeader(w, "Content-Length", attr.Size)
+        }
 	objr, err := obj.NewReader(ctx)
 	if err != nil {
 		handleError(w, err)
@@ -133,9 +148,21 @@ func main() {
 		log.Fatalf("Failed to create client: %v", err)
 	}
 
-	r := mux.NewRouter()
-	r.HandleFunc("/{bucket:[0-9a-zA-Z-_.]+}/{object:.*}", wrapper(proxy)).Methods("GET", "HEAD")
+        var buckets_config_path = os.Getenv("BUCKETS_CONFIG_PATH")
 
+        if buckets_config_path == "" {
+                log.Fatalf("empty BUCKETS_CONFIG_PATH variable")
+        }
+
+        filename, _ := filepath.Abs(buckets_config_path)
+
+        yamlFile, err := ioutil.ReadFile(filename)
+        check(err)
+        err = yaml.Unmarshal(yamlFile, &config)
+        check(err)
+
+	r := mux.NewRouter()
+	r.HandleFunc("/{object:.*}", wrapper(proxy)).Methods("GET", "HEAD")
 	log.Printf("[service] listening on %s", *bind)
 	if err := http.ListenAndServe(*bind, r); err != nil {
 		log.Fatal(err)

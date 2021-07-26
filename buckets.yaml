@@ -1,0 +1,4 @@
+buckets:
+# fqdn (Host header) : bucket_name
+    test1.example.com: test1
+    test2.example.com: test2
